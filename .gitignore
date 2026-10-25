@@ -1,0 +1,31 @@
+# Ortam değişkenleri ve hassas bilgiler
+.env
+.env.*
+*.env
+
+# Sanal ortam (Virtual Environment)
+venv/
+.venv/
+env/
+ENV/
+
+# Çıktı klasörleri
+output/
+outputs/
+
+# Python derleme ve önbellek dosyaları
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Geçici veya çalışma dosyaları
+*_draft_cache.json
+*_analysis_partial.json
+
+# IDE ve Editör ayarları
+.vscode/
+.idea/
+*.swp
+*.swo
