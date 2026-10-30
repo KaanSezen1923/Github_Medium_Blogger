@@ -1,33 +1,15 @@
 """
-GITHUB REPO -> MEDIUM BLOG YAZISI (Uçtan Uca Pipeline)
+MERKEZİ ORKESTRATÖR VE KONTROLCÜ (main.py)
 
-Tek komutla tüm aşamaları sırayla çalıştırır:
-    1. try.py          -> Repoyu GitHub'dan çek, filtrele
-    2. analyze_repo.py -> Her dosyayı LLM ile analiz et
-    3. plan_blog.py    -> Blog iskeletini (outline) çıkar
-    4. write_blog.py   -> Bölüm bölüm yaz, kod kesitlerini doğrulayıp göm
-    5. Teslim          -> Markdown taslağı kaydet ve ekrana bas
-
-Bu dosya diğer dört dosyayı DEĞİŞTİRMEDEN onların sınıf/fonksiyonlarını kullanır.
-Hepsi (try.py, analyze_repo.py, plan_blog.py, write_blog.py, logger.py, .env) aynı dizinde olmalıdır.
-
-Kullanım:
-    python main.py https://github.com/kullanici/repo
-    python main.py                                   # URL'yi sorar
-    python main.py <url> --review                    # outline aşamasında durup onay ister
-    python main.py <url> --audience "yeni başlayanlar" --tone "samimi, hikâye anlatan"
-    python main.py <url> --workers 4                 # analizde paralel istek sayısı
-    python main.py <url> --fresh                     # önbelleği yok say, baştan çalış
-
-Hata olursa veya Ctrl+C yaparsanız aynı komutu tekrar çalıştırın: tamamlanan aşamalar ve
-dosyalar önbellekten alınır, kalan yerden devam edilir.
-
-Çıktılar: output/<sahip>__<repo>/ klasörüne yazılır.
+Uçtan uca akışı yöneten saf kontrolcü (Controller):
+1. GitHubFetcher ile repoyu belleğe çeker ve önbelleğe yazar.
+2. AnalyzerAgent ile dosyaları analiz eder.
+3. PlannerAgent ile odak alanını ve blog iskeletini (BlogOutline) oluşturur.
+4. WriterAgent ile bölümleri ve kod kesitlerini birleştirip Markdown üretir.
+5. Sonuçları (JSON / Markdown) diske kaydeder.
 """
 
 import argparse
-import base64
-import importlib.util
 import json
 import os
 import re
@@ -35,23 +17,30 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
-import analyze_repo   # noqa: E402
-import plan_blog      # noqa: E402
-import write_blog     # noqa: E402
+from agents.analyzer_agent import AnalyzerAgent
+from agents.planner_agent import DEFAULT_AUDIENCE, DEFAULT_TONE, PlannerAgent
+from agents.writer_agent import WriterAgent
+from core.github_fetcher import GitHubFetcher, parse_repo_url
+from core.utils import (
+    SNIPPET_TOKEN,
+    final_checks,
+    partition_repo_files,
+    word_count,
+)
+from schemas.blog_schemas import BlogOutline
 
 TOTAL_STAGES = 5
-MIN_ANALYZED_FILES = 3          # Bu kadar dosya analiz edilemezse pipeline durur
-MAX_OUTLINE_ATTEMPTS = 3        # Kalite kapısını geçemezse outline en fazla bu kadar üretilir
+MIN_ANALYZED_FILES = 3
+MAX_OUTLINE_ATTEMPTS = 3
 
 
 # =====================================================================
-# YARDIMCILAR
+# I/O, ÖNBELLEK VE CLI YARDIMCILARI
 # =====================================================================
 
 def banner(n: int, title: str):
@@ -70,25 +59,6 @@ def save_json(path: str, data: dict):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def load_fetcher():
-    """'try' Python'da ayrılmış bir kelime olduğu için try.py'yi importlib ile yüklüyoruz."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "try.py")
-    if not os.path.exists(path):
-        raise FileNotFoundError("try.py bulunamadı. main.py ile aynı dizinde olmalı.")
-    spec = importlib.util.spec_from_file_location("github_fetcher", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def parse_repo_url(url: str) -> Tuple[str, str]:
-    parsed = urlparse(url.strip())
-    parts = [p for p in parsed.path.split("/") if p]
-    if len(parts) < 2:
-        raise ValueError("Geçersiz GitHub Repo URL'si. Örnek: https://github.com/kullanici/repo")
-    return parts[0], re.sub(r"\.git$", "", parts[1])
-
-
 def build_paths(workdir: str, repo: str) -> Dict[str, str]:
     base = os.path.join(workdir, repo)
     return {
@@ -103,18 +73,42 @@ def build_paths(workdir: str, repo: str) -> Dict[str, str]:
 
 
 def check_environment():
-    host = (os.getenv("OLLAMA_HOST") or "https://ollama.com")
+    host = os.getenv("OLLAMA_HOST") or "[https://ollama.com](https://ollama.com)"
     if "ollama.com" in host and not os.getenv("OLLAMA_API_KEY"):
         print("UYARI: OLLAMA_API_KEY .env içinde bulunamadı. Bulut modeller 401 hatası verebilir.")
     if not os.getenv("GITHUB_TOKEN"):
         print("UYARI: GITHUB_TOKEN .env içinde yok. GitHub rate limit düşük olacak.")
 
 
+def print_outline(outline: dict):
+    print("\n" + "=" * 65)
+    print(f" ODAK ALANI: {outline.get('selected_focus_area', '-')}")
+    if outline.get("recommended_focus_areas"):
+        print(" ALTERNATİF ODAKLAR:")
+        for idx, fa in enumerate(outline["recommended_focus_areas"], 1):
+            marker = "★" if fa == outline.get("selected_focus_area") else " "
+            print(f"   [{idx}] {marker} {fa}")
+    print("-" * 65)
+    print(f" BAŞLIK    : {outline['chosen_title']}")
+    print(f" ALT BAŞLIK: {outline['subtitle']}")
+    print(f" OKUMA     : ~{outline['estimated_read_minutes']} dk | ETİKETLER: {', '.join(outline['tags'])}")
+    print("-" * 65)
+    for i, sec in enumerate(outline["sections"], 1):
+        print(f" {i}. {sec['heading']} (~{sec['estimated_words']} kelime)")
+        print(f"    Amaç    : {sec['goal']}")
+        print(f"    Dosyalar: {', '.join(sec['source_files']) or '-'}")
+        if sec.get("use_snippet_from"):
+            print(f"    Kod     : {sec['use_snippet_from']}")
+    print("-" * 65)
+    print(f" SONUÇ     : {outline['conclusion_idea']}")
+    print("=" * 65)
+
+
 # =====================================================================
-# AŞAMA 1: REPO ÇEKME
+# AŞAMA 1: VERİ ÇEKME (core/github_fetcher.py)
 # =====================================================================
 
-def stage_fetch(owner: str, repo: str, fetcher, path: str, fresh: bool) -> dict:
+def stage_fetch(owner: str, repo: str, path: str, fresh: bool) -> dict:
     banner(1, "REPO GITHUB'DAN ÇEKİLİYOR")
 
     if os.path.exists(path) and not fresh:
@@ -122,57 +116,24 @@ def stage_fetch(owner: str, repo: str, fetcher, path: str, fresh: bool) -> dict:
         print(f"Önbellekten yüklendi: {path} ({len(data.get('files', []))} dosya)")
         return data
 
-    print(f"Repo bilgileri alınıyor: {owner}/{repo}...")
-    repo_info = fetcher.gh_get(f"/repos/{owner}/{repo}")
-    branch = repo_info.get("default_branch", "main")
-    languages = fetcher.gh_get(f"/repos/{owner}/{repo}/languages")
+    fetcher = GitHubFetcher()
+    print(f"Repo indiriliyor: {owner}/{repo}...")
 
-    print(f"Dosya ağacı alınıyor (Branch: {branch})...")
-    tree_data = fetcher.gh_get(f"/repos/{owner}/{repo}/git/trees/{branch}", recursive=1)
-    if tree_data.get("truncated"):
-        print("UYARI: Repo çok büyük, GitHub dosya ağacını kırptı. Bazı dosyalar eksik olabilir.")
+    def on_progress(idx: int, total: int, file_path: str, size: int):
+        print(f"  [{idx}/{total}] {file_path} ({size / 1024:.1f} KB)")
 
-    blobs = [
-        e for e in tree_data.get("tree", [])
-        if e["type"] == "blob" and fetcher.is_allowed_file(e["path"], e.get("size", 0))
-    ]
-    if not blobs:
-        raise RuntimeError("Filtreleme sonrası indirilecek dosya kalmadı. Repo desteklenen dosya türlerini içermiyor olabilir.")
-
-    print(f"İndirilecek dosya sayısı: {len(blobs)}")
-    files, total_size = [], 0
-    for idx, blob in enumerate(blobs, 1):
-        size = blob.get("size", 0)
-        print(f"  [{idx}/{len(blobs)}] {blob['path']} ({size / 1024:.1f} KB)")
-        try:
-            blob_data = fetcher.gh_get(f"/repos/{owner}/{repo}/git/blobs/{blob['sha']}")
-            content = base64.b64decode(blob_data["content"]).decode("utf-8", errors="replace")
-            total_size += size
-        except Exception as e:
-            content = f"[İndirme/Çözümleme Hatası: {e}]"
-        files.append({"path": blob["path"], "size": size, "sha": blob["sha"], "content": content})
-
-    data = {
-        "repository": repo_info.get("full_name"),
-        "description": repo_info.get("description"),
-        "stargazers_count": repo_info.get("stargazers_count"),
-        "languages": list(languages.keys()),
-        "total_files": len(files),
-        "total_size_kb": round(total_size / 1024, 2),
-        "directory_structure": [f["path"] for f in files],
-        "files": files,
-    }
+    data = fetcher.fetch_repository(owner, repo, progress_callback=on_progress)
     save_json(path, data)
     print(f"Kaydedildi: {path} ({data['total_size_kb']} KB)")
     return data
 
 
 # =====================================================================
-# AŞAMA 2: DOSYA ANALİZİ
+# AŞAMA 2: DOSYA ANALİZİ (agents/analyzer_agent.py)
 # =====================================================================
 
 def stage_analyze(repo_data: dict, paths: Dict[str, str], workers: int, fresh: bool) -> dict:
-    banner(2, "DOSYALAR LLM İLE ANALİZ EDİLİYOR")
+    banner(2, "DOSYALAR ANALYZER AGENT İLE İNCELENİYOR")
 
     if os.path.exists(paths["analysis"]) and not fresh:
         data = load_json(paths["analysis"])
@@ -183,72 +144,54 @@ def stage_analyze(repo_data: dict, paths: Dict[str, str], workers: int, fresh: b
     files = repo_data.get("files", [])
     directory_structure = repo_data.get("directory_structure") or [f["path"] for f in files]
 
-    dependency_manifests, markdown_docs, analyzable = {}, {}, []
-    for f_info in files:
-        path = f_info["path"]
-        fname = path.split("/")[-1].lower()
-        content = f_info.get("content", "")
-        if fname in analyze_repo.META_FILENAMES:
-            try:
-                dependency_manifests[path] = json.loads(content) if fname.endswith(".json") else content
-            except Exception:
-                dependency_manifests[path] = content
-            continue
-        if fname.endswith(".md"):
-            markdown_docs[path] = content
-            continue
-        ok, _ = analyze_repo.should_analyze_with_llm(f_info)
-        if ok:
-            analyzable.append(f_info)
+    dependency_manifests, markdown_docs, analyzable, _ = partition_repo_files(files)
 
     print(f"Proje: {repo_name} | Toplam dosya: {len(files)} | Analiz edilecek: {len(analyzable)}")
     if not analyzable:
         raise RuntimeError("Analiz edilecek kod dosyası bulunamadı.")
 
-    # Kaldığı yerden devam: daha önce başarıyla analiz edilenleri atla
     partial: Dict[str, dict] = {}
     if os.path.exists(paths["analysis_partial"]) and not fresh:
         partial = load_json(paths["analysis_partial"])
-        print(f"Önceki çalışmadan {len(partial)} dosya analizi bulundu, atlanacak.")
+        print(f"Önceki çalışmadan {len(partial)} dosya analizi önbellekten yüklendi.")
 
     todo = [f for f in analyzable if f["path"] not in partial]
     failed: List[dict] = []
 
     if todo:
-        analyzer = analyze_repo.LLMAnalyzer()
-        print(f"Model çağrıları başlıyor ({workers} paralel istek)...\n")
+        analyzer = AnalyzerAgent()
+        print(f"Model: {analyzer.model_name} ({workers} paralel istek)...\n")
 
-        def work(f_info):
+        def analyze_task(f_info: dict):
             try:
-                res = analyzer.analyze_file(repo_name=repo_name, file_path=f_info["path"], file_content=f_info["content"])
-                return f_info, res, None
+                result_schema = analyzer.run(
+                    repo_name=repo_name,
+                    file_path=f_info["path"],
+                    file_content=f_info["content"],
+                )
+                return f_info, result_schema.model_dump(), None
             except Exception as e:
                 return f_info, None, str(e)
 
         done = 0
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-            futures = [ex.submit(work, f) for f in todo]
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+            futures = [executor.submit(analyze_task, f) for f in todo]
             for fut in as_completed(futures):
-                f_info, res, err = fut.result()
+                f_info, res_dict, err = fut.result()
                 done += 1
                 if err:
                     print(f"  [{done}/{len(todo)}] ✗ {f_info['path']}: {err[:150]}")
                     failed.append({"path": f_info["path"], "error": err[:500]})
                 else:
-                    partial[f_info["path"]] = {"path": f_info["path"], "size": f_info.get("size", 0), **res}
+                    partial[f_info["path"]] = {"path": f_info["path"], "size": f_info.get("size", 0), **res_dict}
                     save_json(paths["analysis_partial"], partial)
-                    print(f"  [{done}/{len(todo)}] ✓ {f_info['path']} (puan: {res['blog_worthiness_score']}/10)")
+                    dom = res_dict.get("architectural_domain", "Genel Mimari")
+                    print(f"  [{done}/{len(todo)}] ✓ {f_info['path']} [{dom}] (puan: {res_dict['blog_worthiness_score']}/10)")
 
     analyzed = [partial[f["path"]] for f in analyzable if f["path"] in partial]
     min_needed = min(MIN_ANALYZED_FILES, len(analyzable))
     if len(analyzed) < min_needed:
-        raise RuntimeError(
-            f"Yalnızca {len(analyzed)} dosya analiz edilebildi (en az {min_needed} gerekli). "
-            "Komutu tekrar çalıştırın; başarılı olanlar atlanır, başarısızlar yeniden denenir. "
-            "Sorun sürerse .env içinde OLLAMA_MODEL değerini değiştirmeyi deneyin."
-        )
-    if failed:
-        print(f"\nUYARI: {len(failed)} dosya analiz edilemedi, bunlarsız devam ediliyor.")
+        raise RuntimeError(f"Yalnızca {len(analyzed)} dosya analiz edilebildi (en az {min_needed} gerekli).")
 
     analyzed.sort(key=lambda x: x.get("blog_worthiness_score", 0), reverse=True)
     highlights: List[str] = []
@@ -257,7 +200,7 @@ def stage_analyze(repo_data: dict, paths: Dict[str, str], workers: int, fresh: b
             if h not in highlights:
                 highlights.append(h)
 
-    analysis = {
+    analysis_data = {
         "repository": repo_name,
         "description": repo_data.get("description"),
         "stargazers_count": repo_data.get("stargazers_count", 0),
@@ -268,8 +211,11 @@ def stage_analyze(repo_data: dict, paths: Dict[str, str], workers: int, fresh: b
         "project_wide_highlights": highlights,
         "top_architectural_files": [
             {
-                "path": i["path"], "score": i["blog_worthiness_score"],
-                "responsibility": i["responsibility"], "engineering_highlights": i["engineering_highlights"],
+                "path": i["path"],
+                "architectural_domain": i.get("architectural_domain", "Genel Mimari"),
+                "score": i["blog_worthiness_score"],
+                "responsibility": i["responsibility"],
+                "engineering_highlights": i["engineering_highlights"],
             }
             for i in analyzed if i.get("blog_worthiness_score", 0) >= 7
         ],
@@ -277,19 +223,16 @@ def stage_analyze(repo_data: dict, paths: Dict[str, str], workers: int, fresh: b
         "failed_files": failed,
         "file_analyses": analyzed,
     }
-    save_json(paths["analysis"], analysis)
+    save_json(paths["analysis"], analysis_data)
     if os.path.exists(paths["analysis_partial"]) and not failed:
         os.remove(paths["analysis_partial"])
 
     print(f"\nKaydedildi: {paths['analysis']}")
-    print("En değerli dosyalar:")
-    for item in analyzed[:5]:
-        print(f"  ★ [{item['blog_worthiness_score']}/10] {item['path']}")
-    return analysis
+    return analysis_data
 
 
 # =====================================================================
-# AŞAMA 3: OUTLINE
+# AŞAMA 3: BLOG PLANLAMA (agents/planner_agent.py)
 # =====================================================================
 
 def _outline_quality_ok(outline: dict) -> bool:
@@ -297,24 +240,46 @@ def _outline_quality_ok(outline: dict) -> bool:
     return len(secs) >= 3 and all(s["source_files"] for s in secs)
 
 
-def _review_outline(planner, context, audience, tone, outline, analysis) -> dict:
-    """--review modunda: kullanıcı outline'ı onaylar veya geri bildirimle revize ettirir."""
+def _interactive_review(
+    planner: PlannerAgent,
+    analysis: dict,
+    audience: str,
+    tone: str,
+    focus_area: Optional[str],
+    outline: dict,
+) -> dict:
     feedback, need_generate = None, False
     while True:
         if need_generate:
-            outline = planner.plan(context=context, audience=audience, tone=tone,
-                                   previous_outline=outline if feedback else None, feedback=feedback)
-            for w in plan_blog.validate_outline(outline, analysis):
+            outline_model = planner.run(
+                analysis=analysis,
+                audience=audience,
+                tone=tone,
+                focus_area=focus_area,
+                previous_outline=outline if feedback else None,
+                feedback=feedback,
+            )
+            outline = outline_model.model_dump()
+            for w in planner.last_warnings:
                 print(f"  ! {w}")
-            plan_blog.print_outline(outline)
+            print_outline(outline)
             need_generate = False
 
-        print("\n  Enter = Onayla | r = Yeniden üret | t <n> = Başlık seç | Diğer = Geri bildirim")
+        print("\n  Enter = Onayla | r = Yeniden üret | f <n> = Odak seç | t <n> = Başlık seç | Diğer = Geri bildirim")
         choice = input("> ").strip()
         if choice == "":
             return outline
         if choice.lower() == "r":
             outline, feedback, need_generate = None, None, True
+        elif re.fullmatch(r"f\s+\d+", choice.lower()):
+            idx = int(choice.split()[1]) - 1
+            focus_list = outline.get("recommended_focus_areas", [])
+            if 0 <= idx < len(focus_list):
+                focus_area = focus_list[idx]
+                print(f"Yeni odak alanı seçildi: {focus_area} -> İskelet bu odağa göre yeniden üretiliyor...")
+                outline, feedback, need_generate = None, None, True
+            else:
+                print("Geçersiz odak numarası.")
         elif re.fullmatch(r"t\s+\d+", choice.lower()):
             idx = int(choice.split()[1]) - 1
             if 0 <= idx < len(outline["title_options"]):
@@ -326,128 +291,114 @@ def _review_outline(planner, context, audience, tone, outline, analysis) -> dict
             feedback, need_generate = choice, True
 
 
-def stage_outline(analysis: dict, audience: str, tone: str, review: bool, path: str, fresh: bool, analysis_path: str) -> dict:
-    banner(3, "BLOG İSKELETİ (OUTLINE) HAZIRLANIYOR")
+def stage_outline(
+    analysis: dict,
+    audience: str,
+    tone: str,
+    focus_area: Optional[str],
+    review: bool,
+    path: str,
+    fresh: bool,
+    analysis_path: str,
+) -> dict:
+    banner(3, "PLANNER AGENT İLE BLOG İSKELETİ HAZIRLANIYOR")
 
-    if os.path.exists(path) and not fresh and not review:
+    if os.path.exists(path) and not fresh and not review and not focus_area:
         data = load_json(path)
         print(f"Önbellekten yüklendi: {path} | Başlık: {data['outline']['chosen_title']}")
         return data
 
-    context_files = plan_blog.select_context_files(analysis)
-    if not context_files:
-        print(f"Puanı {plan_blog.MIN_SCORE_IN_CONTEXT}+ dosya yok, eşik düşürülüyor.")
-        plan_blog.MIN_SCORE_IN_CONTEXT = 1
-        context_files = plan_blog.select_context_files(analysis)
-    context = plan_blog.build_context(analysis, context_files)
-    print(f"Bağlama {len(context_files)} dosya alındı (~{len(context)} karakter). Hedef kitle: {audience}")
-
-    planner = plan_blog.OutlinePlanner()
-    print(f"Model: {planner.model_name}")
+    planner = PlannerAgent()
+    print(f"Model: {planner.model_name} | Hedef kitle: {audience} | Odak: {focus_area or 'Otomatik Keşif'}")
 
     outline = None
     for attempt in range(1, MAX_OUTLINE_ATTEMPTS + 1):
         print(f"Outline üretiliyor (deneme {attempt}/{MAX_OUTLINE_ATTEMPTS})...")
-        outline = planner.plan(context=context, audience=audience, tone=tone)
-        for w in plan_blog.validate_outline(outline, analysis):
+        outline_model: BlogOutline = planner.run(
+            analysis=analysis,
+            audience=audience,
+            tone=tone,
+            focus_area=focus_area,
+        )
+        outline = outline_model.model_dump()
+        for w in planner.last_warnings:
             print(f"  ! {w}")
         if _outline_quality_ok(outline):
             break
         print("  Kalite kapısı: bölüm sayısı <3 veya kaynak dosyasız bölüm var, yeniden deneniyor.")
     else:
-        # Son denemede de kapıyı geçemedi: kaynaksız bölümleri at, en az 2 bölüm kalıyorsa devam et
         kept = [s for s in outline["sections"] if s["source_files"]]
         if len(kept) < 2:
-            raise RuntimeError("Geçerli bir outline üretilemedi. OUTLINE_MODEL için daha güçlü bir model deneyin.")
+            raise RuntimeError("Geçerli bir outline üretilemedi.")
         outline["sections"] = kept
-        print(f"  Kaynaksız bölümler çıkarıldı, {len(kept)} bölümle devam ediliyor.")
 
-    plan_blog.print_outline(outline)
+    print_outline(outline)
     if review:
-        outline = _review_outline(planner, context, audience, tone, outline, analysis)
+        outline = _interactive_review(planner, analysis, audience, tone, focus_area, outline)
 
-    data = {
+    outline_data = {
         "repository": analysis.get("repository"),
         "source_analysis_file": analysis_path,
         "audience": audience,
         "tone": tone,
+        "focus_area": outline.get("selected_focus_area"),
         "outline": outline,
     }
-    save_json(path, data)
+    save_json(path, outline_data)
     print(f"\nKaydedildi: {path}")
-    return data
+    return outline_data
 
 
 # =====================================================================
-# AŞAMA 4: YAZIM
+# AŞAMA 4: BLOG YAZIMI (agents/writer_agent.py)
 # =====================================================================
 
 def stage_write(outline_data: dict, analysis: dict, repo_data: dict, paths: Dict[str, str], fresh: bool) -> Tuple[Dict[str, str], List[str], str]:
-    banner(4, "BLOG YAZISI BÖLÜM BÖLÜM YAZILIYOR")
+    banner(4, "WRITER AGENT İLE BLOG YAZISI YAZILIYOR")
 
     code_contents = {f["path"]: f.get("content", "") for f in repo_data.get("files", [])}
-    writer = write_blog.BlogWriter(outline_data, analysis, code_contents)
-    outline = outline_data["outline"]
-    sections = outline["sections"]
-    print(f"Model: {writer.model_name} | Bölüm sayısı: {len(sections)} | Kesit doğrulama: AÇIK")
+    writer = WriterAgent(outline_data=outline_data, analysis=analysis, code_contents=code_contents)
+    sections = outline_data["outline"]["sections"]
+    print(f"Model: {writer.model_name} | Bölüm sayısı: {len(sections)} | Odak: {outline_data['outline'].get('selected_focus_area', '-')}")
 
-    parts: Dict[str, str] = {}
+    initial_parts: Dict[str, str] = {}
     if os.path.exists(paths["draft_cache"]):
         if fresh:
             os.remove(paths["draft_cache"])
         else:
-            parts = load_json(paths["draft_cache"]).get("parts", {})
-            print(f"Yarım kalan taslaktan {len(parts)} parça yüklendi, devam ediliyor.")
+            initial_parts = load_json(paths["draft_cache"]).get("parts", {})
+            print(f"Önbellekten {len(initial_parts)} tamamlanmış parça yüklendi.")
 
-    def checkpoint():
-        save_json(paths["draft_cache"], {"parts": parts})
+    def on_part_complete(part_key: str, text: str, current_parts: Dict[str, str]):
+        save_json(paths["draft_cache"], {"parts": current_parts})
+        label = "Giriş" if part_key == "intro" else ("Sonuç" if part_key == "conclusion" else part_key)
+        print(f"  ✓ [{label}] tamamlandı ve önbelleğe alındı ({word_count(text)} kelime)")
 
-    if "intro" not in parts:
-        print("[Giriş] yazılıyor...")
-        parts["intro"] = writer.write_intro()
-        checkpoint()
-
-    for i, sec in enumerate(sections):
-        key = f"sec_{i}"
-        if key in parts:
-            print(f"[{i + 1}/{len(sections)}] (önbellekten) {sec['heading']}")
-            continue
-        print(f"[{i + 1}/{len(sections)}] Yazılıyor: {sec['heading']}")
-        previous = [(s["heading"], parts[f"sec_{j}"]) for j, s in enumerate(sections[:i])]
-        text, snip = writer.write_section(i, previous)
-        parts[key] = text
-        checkpoint()
-        print(f"   ✓ {write_blog.word_count(text)} kelime" + (f" | kod: {snip['path']}" if snip else ""))
-        time.sleep(0.3)
-
-    if "conclusion" not in parts:
-        print("[Sonuç] yazılıyor...")
-        parts["conclusion"] = writer.write_conclusion()
-        checkpoint()
-
-    markdown = write_blog.assemble_markdown(outline, analysis.get("repository", ""), parts)
-    return parts, writer.warnings, markdown
+    result = writer.run(initial_parts=initial_parts, on_part_complete=on_part_complete)
+    return result["parts"], result["warnings"], result["markdown"]
 
 
 # =====================================================================
-# AŞAMA 5: TESLİM
+# AŞAMA 5: TESLİM VE KAYIT
 # =====================================================================
 
 def stage_deliver(markdown: str, outline: dict, analysis: dict, warnings: List[str], paths: Dict[str, str], show: bool, elapsed: float):
-    banner(5, "TASLAK KAYDEDİLİYOR")
+    banner(5, "TASLAK DİSKE KAYDEDİLİYOR")
 
-    issues = write_blog.final_checks(markdown, outline)
-    if write_blog.SNIPPET_TOKEN in markdown:
-        markdown = markdown.replace(write_blog.SNIPPET_TOKEN, "")   # güvenlik ağı: yazıda yer tutucu kalmasın
+    issues = final_checks(markdown)
+    if SNIPPET_TOKEN in markdown:
+        markdown = markdown.replace(SNIPPET_TOKEN, "")
         issues = [i for i in issues if "yer tutucu" not in i.lower()] + ["Kullanılmamış yer tutucu otomatik temizlendi."]
 
     with open(paths["draft"], "w", encoding="utf-8") as f:
         f.write(markdown)
 
-    total_words = write_blog.word_count(re.sub(r"```.*?```", "", markdown, flags=re.DOTALL))
+    total_words = word_count(re.sub(r"```.*?```", "", markdown, flags=re.DOTALL))
     code_blocks = markdown.count("```") // 2
     meta = {
         "repository": analysis.get("repository"),
+        "focus_area": outline.get("selected_focus_area"),
+        "recommended_focus_areas": outline.get("recommended_focus_areas", []),
         "title": outline["chosen_title"],
         "subtitle": outline["subtitle"],
         "tags": outline.get("tags", []),
@@ -472,41 +423,29 @@ def stage_deliver(markdown: str, outline: dict, analysis: dict, warnings: List[s
 
     print("\n" + "=" * 65)
     print(f" TAMAMLANDI! (toplam {elapsed / 60:.1f} dakika)")
+    print(f" Odak Alanı : {outline.get('selected_focus_area', '-')}")
     print(f" Başlık     : {outline['chosen_title']}")
     print(f" Uzunluk    : ~{total_words} kelime (~{meta['estimated_read_minutes']} dk okuma) | {code_blocks} kod bloğu")
-    print(f" Etiketler  : {', '.join(meta['tags'])}")
     print(f" Taslak     : {paths['draft']}")
     print(f" Meta       : {paths['meta']}")
-    if warnings:
-        print(f" Yazar uyarıları ({len(warnings)}):")
-        for w in warnings[:8]:
-            print(f"   ! {w}")
-        if len(warnings) > 8:
-            print(f"   ... ve {len(warnings) - 8} uyarı daha (meta dosyasında)")
-    if issues:
-        print(" Son kontrol:")
-        for i in issues:
-            print(f"   ! {i}")
-    print("-" * 65)
-    print(" Yayınlamadan önce yazıyı okuyup kontrol edin: model analizde olmayan bir")
-    print(" iddia eklemiş olabilir; bunu otomatik olarak yakalayamıyoruz.")
     print("=" * 65)
 
 
 # =====================================================================
-# ANA AKIŞ
+# ANA KONTROLCÜ GİRİŞ NOKTASI
 # =====================================================================
 
 def parse_args():
     p = argparse.ArgumentParser(description="GitHub reposundan Medium blog yazısı üretir.")
     p.add_argument("url", nargs="?", help="GitHub repo URL'si (verilmezse sorulur)")
-    p.add_argument("--audience", default=None, help="Hedef kitle (varsayılan: .env BLOG_AUDIENCE)")
-    p.add_argument("--tone", default=None, help="Yazı tonu (varsayılan: .env BLOG_TONE)")
-    p.add_argument("--review", action="store_true", help="Outline aşamasında durup onay/geri bildirim iste")
-    p.add_argument("--workers", type=int, default=3, help="Analiz aşamasında paralel LLM isteği sayısı (varsayılan 3)")
-    p.add_argument("--fresh", action="store_true", help="Önbelleği yok say, tüm aşamaları baştan çalıştır")
-    p.add_argument("--output-dir", default="output", help="Çıktı klasörü (varsayılan: output)")
-    p.add_argument("--no-print", action="store_true", help="Bitince yazının tamamını ekrana basma")
+    p.add_argument("--audience", default=None, help="Hedef kitle")
+    p.add_argument("--tone", default=None, help="Yazı tonu")
+    p.add_argument("--focus", default=None, help="Blog yazısının odaklanacağı spesifik teknik/mimari alan")
+    p.add_argument("--review", action="store_true", help="Outline aşamasında onay/geri bildirim iste")
+    p.add_argument("--workers", type=int, default=3, help="Paralel LLM isteği sayısı")
+    p.add_argument("--fresh", action="store_true", help="Önbelleği yok say ve baştan çalış")
+    p.add_argument("--output-dir", default="output", help="Çıktı klasörü")
+    p.add_argument("--no-print", action="store_true", help="Bitince yazıyı ekrana basma")
     return p.parse_args()
 
 
@@ -514,7 +453,7 @@ def main():
     args = parse_args()
 
     print("=" * 65)
-    print(" GITHUB REPO  ->  MEDIUM BLOG YAZISI")
+    print(" GITHUB REPO -> MEDIUM BLOG YAZISI (PIPELINE CONTROLLER)")
     print("=" * 65)
 
     url = args.url or input("GitHub Repo URL'sini girin: ").strip()
@@ -523,43 +462,47 @@ def main():
     except ValueError as e:
         print(f"\n✗ HATA: {e}")
         sys.exit(1)
+
     check_environment()
 
     workdir = os.path.join(args.output_dir, f"{owner}__{repo}")
     os.makedirs(workdir, exist_ok=True)
     paths = build_paths(workdir, repo)
 
-    audience = args.audience or plan_blog.DEFAULT_AUDIENCE
-    tone = args.tone or plan_blog.DEFAULT_TONE
-
-    print(f"\nRepo       : {owner}/{repo}")
-    print(f"Çıktı      : {workdir}")
-    print(f"Hedef kitle: {audience}")
-    print(f"Ton        : {tone}")
+    audience = args.audience or DEFAULT_AUDIENCE
+    tone = args.tone or DEFAULT_TONE
 
     start = time.time()
     try:
-        fetcher = load_fetcher()
-        repo_data = stage_fetch(owner, repo, fetcher, paths["code"], args.fresh)
+        repo_data = stage_fetch(owner, repo, paths["code"], args.fresh)
         analysis = stage_analyze(repo_data, paths, args.workers, args.fresh)
-        outline_data = stage_outline(analysis, audience, tone, args.review, paths["outline"], args.fresh, paths["analysis"])
+        outline_data = stage_outline(
+            analysis=analysis,
+            audience=audience,
+            tone=tone,
+            focus_area=args.focus,
+            review=args.review,
+            path=paths["outline"],
+            fresh=args.fresh,
+            analysis_path=paths["analysis"],
+        )
 
-        if os.path.exists(paths["draft"]) and not args.fresh:
+        if os.path.exists(paths["draft"]) and not args.fresh and not args.focus:
             print(f"\n[4/{TOTAL_STAGES}] Taslak zaten var ({paths['draft']}). Yeniden yazmak için --fresh kullanın.")
             with open(paths["draft"], "r", encoding="utf-8") as f:
                 markdown = f.read()
             warnings: List[str] = []
         else:
-            _, warnings, markdown = stage_write(outline_data, analysis, repo_data, paths, args.fresh)
+            _, warnings, markdown = stage_write(outline_data, analysis, repo_data, paths, args.fresh or bool(args.focus))
 
         stage_deliver(markdown, outline_data["outline"], analysis, warnings, paths, not args.no_print, time.time() - start)
 
     except KeyboardInterrupt:
-        print("\n\nDurduruldu. Aynı komutu tekrar çalıştırırsanız kaldığı yerden devam eder.")
+        print("\n\nİşlem kullanıcı tarafından durduruldu. Aynı komutu çalıştırarak kaldığınız yerden devam edebilirsiniz.")
         sys.exit(130)
     except Exception as e:
         print(f"\n✗ HATA: {e}")
-        print("Aynı komutu tekrar çalıştırırsanız tamamlanan aşamalar atlanır ve kaldığı yerden devam edilir.")
+        print("Aynı komutu tekrar çalıştırdığınızda tamamlanan aşamalar önbellekten yüklenerek devam edecektir.")
         sys.exit(1)
 
 
