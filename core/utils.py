@@ -310,6 +310,22 @@ def assemble_markdown(outline: Union[BlogOutline, dict], repository: str, parts:
     return "\n".join(out)
 
 
+def sanitize_for_json(data: Any) -> Any:
+    """
+    Veri yapısı (dict, list, str vb.) içerisindeki PostgreSQL JSONB alanlarını 
+    patlatabilecek \u0000 (null byte) karakterlerini recursive olarak temizler.
+    """
+    if isinstance(data, str):
+        return data.replace("\x00", "").replace("\u0000", "")
+    elif isinstance(data, dict):
+        return {k: sanitize_for_json(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [sanitize_for_json(item) for item in data]
+    elif isinstance(data, tuple):
+        return tuple(sanitize_for_json(item) for item in data)
+    return data
+
+
 def final_checks(markdown: str) -> List[str]:
     """Üretilen Markdown taslağında kalan yer tutucu veya dengesiz kod çitlerini kontrol eder."""
     issues = []

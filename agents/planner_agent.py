@@ -14,19 +14,15 @@ DEFAULT_AUDIENCE = os.getenv("BLOG_AUDIENCE", "orta seviye yazılım geliştiric
 DEFAULT_TONE = os.getenv("BLOG_TONE", "öğretici ama samimi, birinci tekil şahıs (projeyi yapan kişi anlatıyor)")
 
 OUTLINE_SYSTEM_PROMPT = """Sen deneyimli bir Teknik İçerik Editörü ve Medium yazarısın.
-Görevin, bir GitHub reposunun mimari analizinden yola çıkarak ilgi çekici bir Medium blog yazısının İSKELETİNİ (outline) tasarlamaktır. Yazının kendisini yazmayacaksın, sadece planını çıkaracaksın.
+Görevin, bir GitHub reposunun mimari analizinden yola çıkarak ilgi çekici bir Medium blog yazısının İSKELETİNİ (outline) tasarlamaktır.
 
 Kurallara sıkı sıkıya uy:
-1. ODAK ALANI BELİRLE (ÇORBA YAPMA): Her şeyden biraz bahseden yüzeysel bir proje tanıtımı yapma!
-   - Önce `recommended_focus_areas` listesine bu repodan çıkabilecek en güçlü 3 spesifik mühendislik konusunu yaz.
-   - Eğer kullanıcı özel bir odak alanı (`İSTENEN ODAK ALANI`) belirttiyse `selected_focus_area` olarak onu kullan; belirtmediyse önerdiğin 3 alandan en derinlikli olanını `selected_focus_area` olarak seç ve TÜM YAZI PLANINI bu odak alanı etrafında kurgula.
-2. HİKÂYE KUR, DOSYA GEZMESİ YAPMA: Yazı "dosya dosya anlatım" olmamalı. Seçilen odak alanı (`selected_focus_area`) ve ortak bir tez (`core_angle`) etrafında, okuyucuyu bir problemden çözüme götüren akış kur. Birbiriyle ilgili dosyaları aynı bölümde birleştir.
-3. SADECE GERÇEĞE DAYAN: Sadece sana verilen dosya analizlerindeki bulguları kullan. Analizde olmayan bir özelliği, kütüphaneyi veya mimariyi uydurma.
-4. DOSYA YOLLARI: `source_files` ve `use_snippet_from` alanlarında SADECE sana verilen dosya listesindeki yolları, birebir aynı yazımla kullan.
-5. KOD KESİTİ: `use_snippet_from` yalnızca listede "snippet: var" olarak işaretli dosyalar için doldurulabilir. Her kod kesiti en fazla bir bölümde kullanılsın.
-6. AKIŞ: Giriş (hook) -> projenin bağlamı/problemi -> seçilen odak alanındaki en değerli 3-5 teknik konu -> öğrenilen dersler.
-7. BAŞLIK: Somut, teknik bir vaat içersin ve seçilen odak alanını yansıtsın. "X Projemi Nasıl Yaptım" gibi jenerik kalıplardan kaçın.
-8. DİL: Tüm içeriği akıcı ve profesyonel Türkçe ile yaz. Evrensel teknik terimler İngilizce kalabilir."""
+1. ODAK ALANI BELİRLE: `recommended_focus_areas` listesine bu repodan çıkabilecek en güçlü 3 spesifik mühendislik konusunu yaz. Belirtilmişse `selected_focus_area` olarak onu kullan.
+2. BÖLÜMLER ARASI BENZERSİZLİK (TEKRARI ÖNLE): Her bölümde farklı bir mimari katmanı veya problemi ele al. Aynı kütüphaneyi, stratejiyi veya teknik detayı (örn. LLM stratejisi veya arama optimizasyonu) birden fazla bölümün `key_points` listesine kesinlikle yazma.
+3. HİKÂYE KUR: Yazı "dosya dosya anlatım" olmamalı. Seçilen odak alanı etrafında okuyucuyu problemden çözüme götüren mantıksal bir akış kur.
+4. SADECE GERÇEĞE DAYAN: Sadece sana verilen dosya analizlerindeki bulguları kullan. Uydurma özellik ekleme.
+5. DOSYA YOLLARI: `source_files` ve `use_snippet_from` alanlarında SADECE verilen dosya listesindeki yolları birebir kullan.
+6. DİL: Tüm içeriği akıcı ve profesyonel Türkçe ile yaz."""
 
 SCHEMA_JSON = json.dumps(BlogOutline.model_json_schema(), ensure_ascii=False, indent=2)
 
@@ -34,7 +30,6 @@ OUTLINE_SYSTEM_PROMPT_FULL = OUTLINE_SYSTEM_PROMPT + f"""
 
 ÇIKTI FORMATI (ZORUNLU):
 Yalnızca aşağıdaki JSON şemasına uyan TEK BİR JSON nesnesi döndür.
-- Kök seviyede doğrudan şemadaki alanlar olmalı. Başka bir anahtarın içine SARMA.
 
 Şema:
 {SCHEMA_JSON}
@@ -70,9 +65,8 @@ class PlannerAgent(BaseAgent):
 
         focus_directive = (
             f"İSTENEN ODAK ALANI (ZORUNLU): {focus_area}\n"
-            f"(Yazının tamamını ve bölümlerini özellikle '{focus_area}' konusunu merkeze alarak kurgula.)\n"
             if focus_area
-            else "İSTENEN ODAK ALANI: Otomatik Keşif (Projedeki en özgün 3 teknik odak alanını `recommended_focus_areas` içinde belirle, en güçlüsünü `selected_focus_area` olarak seç ve planı onun üzerine kur.)\n"
+            else "İSTENEN ODAK ALANI: Otomatik Keşif\n"
         )
 
         user_prompt = (

@@ -25,7 +25,7 @@ from agents.analyzer_agent import AnalyzerAgent
 from agents.planner_agent import DEFAULT_AUDIENCE, DEFAULT_TONE, PlannerAgent
 from agents.writer_agent import WriterAgent
 from core.github_fetcher import GitHubFetcher, parse_repo_url
-from core.utils import SNIPPET_TOKEN, final_checks, partition_repo_files
+from core.utils import SNIPPET_TOKEN, final_checks, partition_repo_files,sanitize_for_json
 from database import engine, get_db
 import models
 
@@ -500,13 +500,17 @@ def write_blog(
         repo_record.status = "completed"
         repo_record.focus_area = selected_focus
 
+        clean_analysis_data = sanitize_for_json(analysis_data)
+        clean_outline_data = sanitize_for_json(outline_data)
+        clean_markdown = sanitize_for_json(markdown)
+
         blog_output = models.BlogOutput(
-            repo_id=repo_record.id,
-            analysis_data=analysis_data,
-            outline_data=outline_data,
-            markdown_content=markdown,
-            warnings=all_warnings,
-        )
+                        repo_id=repo_record.id,
+                        analysis_data=clean_analysis_data,
+                        outline_data=clean_outline_data,
+                        markdown_content=clean_markdown,
+                        warnings=all_warnings,
+                    )
         db.add(blog_output)
         db.commit()
         db.refresh(blog_output)

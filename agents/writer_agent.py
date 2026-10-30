@@ -20,19 +20,19 @@ from schemas.blog_schemas import BlogOutline
 INTRO_WORDS = 180
 CONCLUSION_WORDS = 160
 
-WRITER_SYSTEM_PROMPT = """Sen deneyimli bir Medium yazarı ve kıdemli yazılım mühendisisin.
+WRITER_SYSTEM_PROMPT = """Sen Medium'da yazılım mimarisi üzerine derinlikli makaleler yazan kıdemli bir Yazılım Mühendisisin (Senior Software Engineer).
 Sana verilen blog planının TEK BİR bölümünü (veya giriş/sonuç kısmını) yazacaksın.
 
 Kurallara sıkı sıkıya uy:
-1. SADECE GERÇEĞE DAYAN: Yalnızca sana verilen dosya analizlerindeki bulguları ve SEÇİLEN ODAK ALANI eksenini kullan. Analizde olmayan bir özelliği, kütüphaneyi, performans rakamını veya mimari kararı uydurma.
-2. KOD YAZMA: Cevabında KESİNLİKLE kod bloğu (``` ile) kullanma. Gerekirse satır içi kod (`useEffect`, `apiFetch` gibi) kullanabilirsin.
-3. KOD KESİTİ YER TUTUCUSU: Bölüm için bir kod kesiti verilmişse, kesitin görünmesini istediğin yere TEK BİR SATIRDA, tam olarak şunu yaz: [[KOD_KESITI]]
-   Yer tutucudan ÖNCE kesitin ne yapacağını anlatan bir giriş cümlesi, SONRA ise kodun neden böyle yazıldığını açıklayan bir paragraf yaz. Kod kesiti verilmediyse yer tutucuyu HİÇ kullanma.
-4. BAŞLIK YAZMA: Bölüm başlığını sen yazma, sistem ekleyecek. Doğrudan paragraflarla başla. Alt başlık gerekiyorsa en fazla bir tane ### kullan.
-5. ÜSLUP: Verilen hedef kitleye, odak alanına ve tona uy. Doğal geçişler kur; önceki bölümü tekrar etme.
-6. UZUNLUK: İstenen hedef kelime sayısına yakın kal (±%25).
-7. DİL: Akıcı ve profesyonel Türkçe. Evrensel teknik terimler İngilizce kalabilir.
-8. ÇIKTI: Sadece yazının metnini (Markdown) döndür."""
+1. "NE" DEĞİL "NEDEN VE NASIL" ANLAT: Dosyanın ne yaptığını yüzeysel özetleme. Hangi mühendislik problemini çözdüğünü, neden bu mimariyi seçtiğini (trade-off), uç durumları (edge-case) somut fonksiyon, değişken ve parametre isimleriyle (`RunnableConfig`, `set_config`, `CROSS JOIN LATERAL` vb.) anlat.
+2. TEKRARDAN KAÇIN: Önceki bölümlerde işlenen teknik detayları bu bölümde KESİNLİKLE tekrar açıklama; gerekirse "önceki adımda kurduğumuz yapı" diyerek doğrudan yeni konuya geç.
+3. KOD YAZMA, YER TUTUCU KULLAN: Cevabında KESİNLİKLE ``` ile kod bloğu yazma. Bölüm için kod kesiti verilmişse, görünmesini istediğin yere TEK BİR SATIRDA tam olarak şunu yaz: [[KOD_KESITI]]
+   - Yer tutucudan ÖNCE: Sana verilen 'Kesitin açıklaması' cümlesini ASLA kopyalama ve "Aşağıdaki kod şunu yapar" gibi mekanik cümleler kurma. Problemi ortaya koyup okuyucuyu koda hazırlayan doğal bir geçiş yap.
+   - Yer tutucudan SONRA: Kodu satır satır tercüme etme. Kodun içindeki en akıllıca mühendislik detayını, güvenlik kontrolünü veya performans optimizasyonunu analiz et.
+   - Kod kesiti verilmediyse [[KOD_KESITI]] yer tutucusunu HİÇ kullanma.
+4. GÖRSEL RİTİM VE FORMAT: Sadece uzun paragraf yığınları yazma. Önemli teknik kavramları **kalın** yaz, satır içi kod (`apiFetch`, `ciftlik_id`) kullan ve çok adımlı mantıkları anlatırken kısa madde işaretlerinden yararlan. Bölüm başlığını (##) sen yazma, sistem ekleyecek.
+5. SADECE GERÇEĞE DAYAN: Analizde ve kaynak kodda olmayan hiçbir kütüphaneyi, özelliği veya metriği uydurma. Varsa somut sayıları (timeout süreleri, limitler, yüzdeler) mutlaka kullan.
+6. DİL VE UZUNLUK: Akıcı, samimi ama teknik ağırlığı yüksek birinci tekil şahıs ("kurguladım", "tercih ettim") Türkçe kullan. Hedef kelime sayısına sadık kal (±%20). Sadece Markdown metni döndür."""
 
 
 class WriterAgent(BaseAgent):
@@ -92,14 +92,18 @@ class WriterAgent(BaseAgent):
             f = self.by_path.get(p)
             if not f:
                 continue
+            raw_code = self.code_contents.get(p, "")
+            code_preview = raw_code[:3500] + ("\n... [kırpıldı]" if len(raw_code) > 3500 else "")
             blocks.append(
-                f"- Dosya: {p}\n"
-                f"  Mimari Alan: {f.get('architectural_domain', 'Genel Mimari')}\n"
-                f"  Sorumluluk: {f.get('responsibility', '')}\n"
-                f"  Kütüphane/Hook: {', '.join(f.get('libraries_and_hooks', [])[:10])}\n"
-                f"  Mühendislik detayları:\n    - " + "\n    - ".join(f.get("engineering_highlights", [])[:6])
+                f"=== DOSYA: {p} ===\n"
+                f"Mimari Alan: {f.get('architectural_domain', 'Genel Mimari')}\n"
+                f"Sorumluluk: {f.get('responsibility', '')}\n"
+                f"Kütüphane/Hook: {', '.join(f.get('libraries_and_hooks', [])[:10])}\n"
+                f"Mühendislik Detayları:\n  - " + "\n  - ".join(f.get("engineering_highlights", [])[:6]) + "\n"
+                f"Gerçek Kod Referansı (Sadece teknik detay/değişken ismi öğrenmek için, cevaba kopyalama):\n"
+                f"<kaynak_kod>\n{code_preview}\n</kaynak_kod>"
             )
-        return "\n".join(blocks) or "(kaynak dosya bilgisi yok)"
+        return "\n\n".join(blocks) or "(kaynak dosya bilgisi yok)"
 
     def prepare_snippet(self, section: dict) -> Tuple[Optional[dict], Optional[str]]:
         path = section.get("use_snippet_from")
@@ -119,8 +123,6 @@ class WriterAgent(BaseAgent):
         if not ok:
             self.warnings.append(f"'{section['heading']}': {path} kesiti doğrulanamadı -> {detail}. Kesit kullanılmadı.")
             return None, None
-        if "doğrulanamadı" in detail:
-            self.warnings.append(f"'{section['heading']}': {path} -> {detail}")
 
         lang = detect_language(path)
         md = f"```{lang}\n{code}\n```\n*Kaynak: `{path}`*"
@@ -150,9 +152,8 @@ class WriterAgent(BaseAgent):
             f"YAZILACAK KISIM: GİRİŞ (başlıksız, doğrudan paragraflarla başla)\n"
             f"Hedef kelime sayısı: ~{INTRO_WORDS}\n"
             f"Girişin açılış fikri: {o['hook']}\n\n"
-            f"Yazının ilerleyişi (okuyucuya merak uyandıracak şekilde, liste yapmadan kısaca ima et):\n{self._roadmap()}\n\n"
-            "Giriş okuyucuyu bir problemle/merakla yakalamalı, seçilen odak alanını tanıtmalı ve yazıdan ne kazanacağını söylemeli. "
-            "Kod kesiti yok, yer tutucu kullanma."
+            f"Yazının ilerleyişi:\n{self._roadmap()}\n\n"
+            "Giriş okuyucuyu bir problemle/merakla yakalamalı, seçilen odak alanını tanıtmalı ve yazıdan ne kazanacağını söylemeli."
         )
         if feedback:
             prompt += f"\n\nEDİTÖR İSTEĞİ: {feedback}"
@@ -170,25 +171,20 @@ class WriterAgent(BaseAgent):
         snippet_info, snippet_md = self.prepare_snippet(sec)
 
         prev_summary = "\n".join(f"  - {h}" for h, _ in previous_parts) or "  (bu ilk bölüm)"
-        last_tail = ""
-        if previous_parts:
-            last_text = re.sub(r"```.*?```", "", previous_parts[-1][1], flags=re.DOTALL).strip()
-            last_tail = last_text.split("\n\n")[-1][:500]
-
+        
         paths = list(sec.get("source_files", []))
         if snippet_info and snippet_info["path"] not in paths:
             paths.append(snippet_info["path"])
 
         prompt = (
             f"{self._blog_header()}\n\n"
-            f"ŞU ANA KADAR YAZILAN BÖLÜMLER:\n{prev_summary}\n"
-            f"ÖNCEKİ BÖLÜMÜN SON PARAGRAFI (akış için, tekrar etme):\n{last_tail or '(yok)'}\n\n"
+            f"ŞU ANA KADAR YAZILAN BÖLÜM BAŞLIKLARI:\n{prev_summary}\n\n"
             f"--- ŞİMDİ YAZILACAK BÖLÜM ---\n"
-            f"Bölüm başlığı (sistem ekleyecek, sen yazma): {sec['heading']}\n"
+            f"Bölüm başlığı (sen yazma): {sec['heading']}\n"
             f"Bölümün amacı: {sec['goal']}\n"
             f"Anlatılması gereken noktalar:\n" + "\n".join(f"  - {kp}" for kp in sec["key_points"]) + "\n"
             f"Hedef kelime sayısı: ~{sec['estimated_words']}\n\n"
-            f"KAYNAK DOSYA ANALİZLERİ (tek doğru kaynağın bunlar):\n{self._file_context(paths)}\n"
+            f"KAYNAK DOSYA ANALİZLERİ VE KODLARI:\n{self._file_context(paths)}\n"
         )
 
         if snippet_info:
@@ -209,11 +205,6 @@ class WriterAgent(BaseAgent):
         for n in notes:
             self.warnings.append(f"'{sec['heading']}': {n}")
 
-        wc = word_count(re.sub(r"```.*?```", "", text, flags=re.DOTALL))
-        target = sec["estimated_words"]
-        if wc < target * 0.5 or wc > target * 2:
-            self.warnings.append(f"'{sec['heading']}': uzunluk hedeften çok farklı ({wc} kelime, hedef ~{target})")
-
         return text, snippet_info
 
     def write_conclusion(self, feedback: Optional[str] = None) -> str:
@@ -224,8 +215,7 @@ class WriterAgent(BaseAgent):
             f"Hedef kelime sayısı: ~{CONCLUSION_WORDS}\n"
             f"Sonuç fikri: {o['conclusion_idea']}\n\n"
             f"Yazıda anlatılan bölümler:\n{self._roadmap()}\n\n"
-            "Yeni teknik iddia ekleme; yazıdan çıkarılan dersleri topla, okuyucuya bir sonraki adımı öner. "
-            "Kod kesiti yok, yer tutucu kullanma."
+            "Yeni teknik iddia ekleme; yazıdan çıkarılan dersleri topla, okuyucuya bir sonraki adımı öner."
         )
         if feedback:
             prompt += f"\n\nEDİTÖR İSTEĞİ: {feedback}"
@@ -236,11 +226,6 @@ class WriterAgent(BaseAgent):
         initial_parts: Optional[Dict[str, str]] = None,
         on_part_complete: Optional[Callable[[str, str, Dict[str, str]], None]] = None,
     ) -> Dict[str, Any]:
-        """
-        Tüm blog yazısını bellekte üretir.
-        Orkestratörün önbellekleme (checkpoint) yapabilmesi için her parça tamamlandığında
-        opsiyonel `on_part_complete(part_key, text, current_parts)` geri çağırımını tetikler.
-        """
         parts: Dict[str, str] = dict(initial_parts) if initial_parts else {}
         sections = self.outline["sections"]
 
